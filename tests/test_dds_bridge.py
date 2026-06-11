@@ -123,3 +123,72 @@ def test_warm_start_converges_on_reachable_targets():
         n_conv += int(info["ik_converged"][0] and info["ik_converged"][1])
 
     assert n_conv >= N - 2, f"reachable 궤적 수렴 {n_conv}/{N}"
+
+
+# ── 개선 패스: 안전 clamp / relative-motion / hold ──────────────────────
+def test_workspace_clamp_bounds_target():
+    """envelope 밖 target 위치가 G1 한계로 clamp 된다."""
+    from groot_teleop.backends.unitree_dds.dds_bridge import g1_workspace_limits
+
+    mapper = IKTargetMapper(
+        left_origin=np.zeros(3), right_origin=np.zeros(3), scale=1.0
+    )
+    far = np.eye(4)
+    far[:3, 3] = [10.0, 10.0, 10.0]   # 한참 밖
+    T = mapper.map(far, "left")
+    lim = g1_workspace_limits()
+    assert T[0, 3] <= lim.x_max + 1e-9
+    assert T[1, 3] <= lim.y_max + 1e-9
+    assert T[2, 3] <= lim.z_max + 1e-9
+
+
+def test_relative_mode_origin_invariant():
+    """relative 모드에서 출력은 mapper origin 에 불변 (recalibrate 가 상쇄)."""
+    from types import SimpleNamespace
+
+    def run_with_origin(origin_val):
+        pub = RecordingPublisher()
+        br = G1DDSBridge(
+            publisher=pub,
+            mapper=IKTargetMapper(
+                left_origin=np.full(3, origin_val),
+                right_origin=np.full(3, origin_val),
+                scale=1.0,
+                limits=None,
+            ),
+            ik_config=IKConfig(max_iters=80, eps=1e-3, n_restarts=1),
+            relative=True,
+        )
+        # 동일 로봇 상태 가정: robot_origin 은 robot state(여기선 q=0)에서 옴 —
+        # mapper origin 과 무관. (실사용은 로봇 피드백 q.)
+        br._q_left = np.zeros(br.left_ik.nq)
+        br._q_right = np.zeros(br.right_ik.nq)
+        w0 = np.eye(4); w0[:3, 3] = [0.0, 0.0, 0.0]
+        out0 = SimpleNamespace(ik_data={"left_wrist": w0, "right_wrist": w0})
+        br.recalibrate(out0)     # origin 캡처 (robot_origin = FK(0), 동일)
+        w1 = np.eye(4); w1[:3, 3] = [0.05, 0.0, 0.0]
+        out1 = SimpleNamespace(ik_data={"left_wrist": w1, "right_wrist": w1})
+        br.step(out1)
+        return pub.last["positions"][L.LEFT_ARM_INDICES].copy()
+
+    a = run_with_origin(0.0)
+    b = run_with_origin(0.3)   # 다른 mapper origin
+    np.testing.assert_allclose(a, b, atol=1e-3)
+
+
+def test_hold_keeps_last_arm():
+    from types import SimpleNamespace
+
+    pub = RecordingPublisher()
+    br = G1DDSBridge(
+        publisher=pub,
+        mapper=IKTargetMapper(scale=0.3),
+        ik_config=IKConfig(max_iters=50, eps=1e-2, n_restarts=1),
+    )
+    src = SyntheticPoseSource(); src.set_time(0.5)
+    streamer = GalaxyXRStreamer(pose_source=src)
+    br.step(streamer.get())
+    last_arm = pub.last["positions"][L.ARM_INDICES].copy()
+    info = br.hold()
+    assert info["held"] is True
+    np.testing.assert_allclose(pub.last["positions"][L.ARM_INDICES], last_arm)

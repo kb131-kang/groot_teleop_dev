@@ -43,6 +43,12 @@ from groot_teleop.backends.unitree_dds.g1_arm_ik import IKConfig
 from groot_teleop.input.galaxy_xr_streamer import GalaxyXRStreamer
 
 
+def _sleep_remainder(t0: float, period: float) -> None:
+    dt = time.perf_counter() - t0
+    if dt < period:
+        time.sleep(period - dt)
+
+
 def build_streamer(args):
     if args.synthetic or args.dry_run:
         from groot_teleop.input.synthetic_streamer import SyntheticPoseSource
@@ -78,6 +84,10 @@ def main():
     ap.add_argument("--rate", type=float, default=60.0, help="control Hz")
     ap.add_argument("--steps", type=int, default=0, help="0=무한")
     ap.add_argument("--scale", type=float, default=0.5, help="XR→robot 위치 스케일")
+    ap.add_argument("--relative", action="store_true",
+                    help="relative-motion 모드 (첫 프레임 자동 recalibrate)")
+    ap.add_argument("--watchdog-timeout", type=float, default=0.2,
+                    help="pose stale timeout(s) — 초과 시 hold (실 헤드셋 모드)")
     args = ap.parse_args()
 
     streamer = build_streamer(args)
@@ -87,7 +97,16 @@ def main():
         publisher=publisher,
         mapper=IKTargetMapper(scale=args.scale),
         ik_config=IKConfig(max_iters=50, eps=1e-3, n_restarts=1),
+        relative=args.relative,
     )
+
+    # 실 헤드셋 모드: pose freshness watchdog (stale → hold).
+    watchdog = None
+    if not (args.dry_run or args.synthetic or args.reachable_demo):
+        from groot_teleop.input.bridge.watchdog import StoreWatchdog
+
+        if hasattr(streamer, "source") and hasattr(streamer.source, "get_stats"):
+            watchdog = StoreWatchdog(streamer.source, timeout_s=args.watchdog_timeout)
 
     mode = "dry-run" if args.dry_run else ("synthetic" if args.synthetic else "Galaxy-XR")
     print(f"[run] mode={mode} rate={args.rate}Hz topic={args.topic} iface='{args.iface}'")
@@ -118,7 +137,18 @@ def main():
             t0 = time.perf_counter()
             if hasattr(src, "step"):  # synthetic: 가상시간 진행
                 src.step(period)
+            # watchdog: pose 가 stale 이면 hold (stale target 송신 차단).
+            if watchdog is not None and not watchdog.fresh():
+                bridge.hold()
+                k += 1
+                _sleep_remainder(t0, period)
+                continue
+
             out = demo(k) if demo is not None else streamer.get()
+            # relative 모드: 첫 유효 프레임에서 자동 recalibrate.
+            if args.relative and k == 0:
+                bridge.step(out)            # _q 초기화
+                bridge.recalibrate(out)
             info = bridge.step(out)
             if k % int(args.rate) == 0:
                 el, er = info["ik_err"]

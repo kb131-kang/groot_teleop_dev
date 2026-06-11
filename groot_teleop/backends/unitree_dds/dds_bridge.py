@@ -28,6 +28,22 @@ from groot_teleop.backends.unitree_dds.g1_arm_ik import (
     IKConfig,
     se3_from_matrix,
 )
+from groot_teleop.common import frames
+from groot_teleop.input.bridge.watchdog import WorkspaceLimits
+
+
+def g1_workspace_limits() -> WorkspaceLimits:
+    """G1 팔 palm 의 base(pelvis) frame 보수적 안전 envelope (m).
+
+    G1 팔 reach ~0.6m. UR10e용 기본값(±3.7m)은 부적합하므로 G1 전용 값.
+    target 위치를 IK 전에 이 범위로 clamp → 비현실적 target 으로 인한 IK
+    발산/자기충돌 방지. 실제 한계는 USER_TEST 에서 조정.
+    """
+    return WorkspaceLimits(
+        x_min=-0.10, x_max=0.65,
+        y_min=-0.55, y_max=0.55,
+        z_min=-0.35, z_max=0.55,
+    )
 
 
 # ── publisher 추상화 ────────────────────────────────────────────────────
@@ -117,12 +133,16 @@ class IKTargetMapper:
         default_factory=lambda: np.array([0.25, -0.20, 0.10])
     )
     scale: float = 1.0
+    limits: Optional[WorkspaceLimits] = field(default_factory=g1_workspace_limits)
 
     def map(self, wrist_T: np.ndarray, side: str) -> np.ndarray:
         origin = self.left_origin if side == "left" else self.right_origin
         T = np.eye(4)
         T[:3, :3] = wrist_T[:3, :3]
-        T[:3, 3] = origin + self.scale * wrist_T[:3, 3]
+        pos = origin + self.scale * wrist_T[:3, 3]
+        if self.limits is not None:
+            pos, _ = self.limits.clamp(pos)
+        T[:3, 3] = pos
         return T
 
 
@@ -135,11 +155,16 @@ class G1DDSBridge:
         ik_config: Optional[IKConfig] = None,
         hold_q: Optional[np.ndarray] = None,
         urdf_path=None,
+        relative: bool = False,
     ):
         self.pub = publisher
         self.mapper = mapper or IKTargetMapper()
+        self.relative = relative
         self.left_ik = G1ArmIK("left", urdf_path=urdf_path, config=ik_config)
         self.right_ik = G1ArmIK("right", urdf_path=urdf_path, config=ik_config)
+        # relative-motion origin (recalibrate 시 캡처).
+        self._wrist_origin = {"left": None, "right": None}      # 4×4 XR-mapped
+        self._robot_origin = {"left": None, "right": None}      # 4×4 robot palm
         # 하체+허리(0–14) 유지 자세. 기본 0 (서있는 중립). SONIC 연결 전까지 hold.
         self.hold_q = (
             np.asarray(hold_q, dtype=np.float64)
@@ -153,11 +178,45 @@ class G1DDSBridge:
         self.kp[L.ARM_INDICES] = L.DEFAULT_ARM_KP
         self.kd[L.ARM_INDICES] = L.DEFAULT_ARM_KD
 
+    def recalibrate(self, streamer_output) -> None:
+        """현재 손목(매핑된)과 현재 로봇 palm(FK)을 relative-motion origin 으로 캡처.
+
+        사용자가 손을 편한 위치에 두고 recalibrate → 이후 그 지점 대비 변위만
+        로봇에 전달(absolute 매핑의 점프 방지). teleop_dev xr_sender 의 'r' 키.
+        """
+        ik = streamer_output.ik_data
+        for side, key, armik, q in (
+            ("left", "left_wrist", self.left_ik, self._q_left),
+            ("right", "right_wrist", self.right_ik, self._q_right),
+        ):
+            self._wrist_origin[side] = self.mapper.map(np.asarray(ik[key]), side)
+            qj = q if q is not None else np.zeros(armik.nq)
+            self._robot_origin[side] = armik.fk(qj).homogeneous
+
+    def hold(self) -> dict:
+        """현재 자세 유지 publish (estop/stale/watchdog). 팔도 직전 명령 유지."""
+        positions = self.hold_q.copy()
+        if self._q_left is not None:
+            positions[L.LEFT_ARM_INDICES] = self._q_left
+        if self._q_right is not None:
+            positions[L.RIGHT_ARM_INDICES] = self._q_right
+        z = np.zeros(L.NUM_JOINTS)
+        self.pub.publish(positions, z, z, self.kp, self.kd)
+        return {"positions": positions, "held": True}
+
+    def _target(self, wrist_T, side: str) -> np.ndarray:
+        mapped = self.mapper.map(np.asarray(wrist_T), side)
+        if self.relative and self._wrist_origin[side] is not None:
+            return frames.relative_motion(
+                mapped, self._wrist_origin[side], self._robot_origin[side]
+            )
+        return mapped
+
     def step(self, streamer_output) -> dict:
         """StreamerOutput 1 frame → lowcmd publish. 디버그 정보 dict 반환."""
         ik = streamer_output.ik_data
-        left_T = self.mapper.map(np.asarray(ik["left_wrist"]), "left")
-        right_T = self.mapper.map(np.asarray(ik["right_wrist"]), "right")
+        left_T = self._target(ik["left_wrist"], "left")
+        right_T = self._target(ik["right_wrist"], "right")
 
         q_l, err_l, conv_l = self.left_ik.solve(
             se3_from_matrix(left_T), q_init=self._q_left
