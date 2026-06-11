@@ -1,0 +1,37 @@
+# 참조 repo (clone, gitignored — 본 repo 에 포함 안 함)
+external/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# conda / venv
+.venv/
+venv/
+env/
+
+# 데이터 / 체크포인트 / 로그
+data/
+checkpoints/
+*.onnx
+*.pt
+*.ckpt
+logs/
+*.log
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+
+# 캘리브레이션 / 런타임 산출물
+*.npz
+recordings/

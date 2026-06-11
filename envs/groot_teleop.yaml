@@ -1,0 +1,48 @@
+# groot_teleop — Operator PC conda 환경 (입력 어댑터 + 브리지 + 오프라인 테스트)
+#
+# 본 환경은 "하드웨어 무관 개발/테스트" 를 위한 메인 환경이다.
+#   - XR 입력 브리지 (BridgePoseStore, aiohttp ws)
+#   - GalaxyXRStreamer 어댑터 (GR00T BaseStreamer 구현)
+#   - 좌표 변환 / IK (pinocchio + pink) 오프라인 검증
+#   - dex_retargeting (손)
+#   - Vive Tracker (openvr) — 2차
+#
+# 설계: teleop_dev/environment.yaml (teleop_operator) 을 베이스로,
+#       GR00T IK + DDS 브리지에 필요한 패키지를 추가.
+#
+# 생성:
+#   conda env create -f envs/groot_teleop.yaml
+#   conda activate groot_teleop
+#
+# 검증 (헤드셋 없이):
+#   python -m groot_teleop.input.bridge.bridge_pose_store --selftest
+#   pytest tests/
+#
+# 주의: numpy<2 고정 — dex_retargeting / pinocchio (eigenpy 1.x ABI) 호환.
+
+name: groot_teleop
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - libusb                    # Manus / openvr 일부 의존
+  - pip
+  - pip:
+    # ── 입력 브리지 (XR) ──────────────────────────────────────────────
+    - aiohttp>=3.8             # WebXR ws bridge (BridgePoseStore)
+    - pyyaml>=6.0              # config 파싱
+    # ── 수치 / 좌표 ──────────────────────────────────────────────────
+    - "numpy<2"                # dex_retargeting / pinocchio ABI 호환
+    - scipy>=1.10              # Rotation, 좌표 변환
+    # ── IK (오프라인 검증 + 런타임) ──────────────────────────────────
+    - pin>=2.7                 # pinocchio (FK/IK, body_ik_solver 호환)
+    - pink>=3.1                # differential IK (teleop_dev/robot/core/pink_ik.py)
+    # ── 손 리타게팅 ──────────────────────────────────────────────────
+    - dex_retargeting          # DexPilot/Vector — gen3a
+    # ── 입력 장비 (2차) ──────────────────────────────────────────────
+    - openvr>=1.26.701         # SteamVR / Vive Tracker
+    - pynput>=1.7.6            # 키보드 입력 (recalibrate/estop)
+    - pygame>=2.0.0            # 게임패드 (선택)
+    # ── 테스트 / 개발 ────────────────────────────────────────────────
+    - pytest>=7.0
+    - pytest-timeout>=2.0

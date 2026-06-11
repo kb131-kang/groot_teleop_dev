@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "groot_teleop"
+version = "0.1.0"
+description = "Galaxy XR / Quest 3 → Unitree G1 whole-body teleoperation (GR00T-WBC backbone)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy<2",
+    "scipy>=1.10",
+    "aiohttp>=3.8",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7.0", "pytest-timeout>=2.0"]
+ik = ["pin>=2.7", "pink>=3.1"]
+hands = ["dex_retargeting"]
+vive = ["openvr>=1.26.701"]
+
+[tool.setuptools.packages.find]
+include = ["groot_teleop*"]
+exclude = ["external*", "tests*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+timeout = 60
